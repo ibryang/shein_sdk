@@ -1,14 +1,11 @@
 package client
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"math"
-	"net/http"
+	"context"
 	"net/url"
-	"time"
+	"strings"
 
+	"github.com/gogf/gf/v2/net/gclient"
 	"github.com/ibryang/shein_sdk/api"
 	"github.com/ibryang/shein_sdk/util"
 )
@@ -25,19 +22,16 @@ const (
 	BuildOpen BuildType = "open"
 )
 
-type HTTPClient interface {
-	Do(req *http.Request) (*http.Response, error)
-}
-
 // SheinClient 客户端结构体
 type SheinClient struct {
 	Domain     string
 	AuthParam  api.AuthParam
-	HTTPClient HTTPClient
+	HTTPClient *gclient.Client
 }
 
 // NewClient 创建新的 SheinClient 实例
 func NewClient() *SheinClient {
+	httpClient := gclient.New()
 	return &SheinClient{
 		Domain:     Domain,
 		HTTPClient: httpClient,
@@ -105,125 +99,56 @@ func (c *SheinClient) Get(path string, params any) (string, error) {
 	return c.get(path, params, headers)
 }
 
+// createRequest 创建并配置请求客户端
+func (c *SheinClient) createRequest(headers map[string]string) *gclient.Client {
+	client := c.HTTPClient.Clone()
+	if len(headers) > 0 {
+		client.SetHeaderMap(headers)
+	}
+	return client
+}
+
+// handleResponse 处理响应结果
+func (c *SheinClient) handleResponse(resp *gclient.Response, err error) (string, error) {
+	if err != nil {
+		return "", err
+	}
+	defer resp.Close()
+	return resp.ReadAllString(), nil
+}
+
 // get 发送 GET 请求
 func (c *SheinClient) get(path string, params any, headers map[string]string) (string, error) {
-	// 拼接参数到 URL
+	reqUrl := c.Domain + path
+
+	// 创建请求客户端
+	client := c.createRequest(headers)
+
+	// 设置查询参数
 	if params != nil {
 		mapParams, err := util.ToMapStrStr(params)
 		if err != nil {
 			return "", err
 		}
-		query := ""
-		i := 0
-		for key, value := range mapParams {
-			value = url.QueryEscape(value)
-			if i == 0 {
-				query += "?" + key + "=" + value
-			} else {
-				query += "&" + key + "=" + value
-			}
-			i++
+		for k, v := range mapParams {
+			reqUrl += (map[bool]string{true: "?", false: "&"}[!strings.Contains(reqUrl, "?")] + k + "=" + url.QueryEscape(v))
 		}
-		path += query
 	}
 
-	url := c.Domain + path
-
-	// 创建请求
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-
-	// 设置头部
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-
-	// 打印调试信息
-	fmt.Printf("GET请求地址: %s\n", path)
-	fmt.Printf("请求header: %s\n", util.ToJSONString(headers))
-
-	// 执行请求
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	// 读取响应
-	body, err := util.ReadResponseBody(resp)
-	if err != nil {
-		return "", err
-	}
-
-	return body, nil
+	// 发送请求并获取响应
+	resp, err := client.Get(context.Background(), reqUrl)
+	return c.handleResponse(resp, err)
 }
 
 // post 发送 POST 请求
 func (c *SheinClient) post(path string, data any, headers map[string]string) (string, error) {
-	url := c.Domain + path
-	var jsonData []byte
-	var err error
-	if data != nil {
-		jsonData, err = json.Marshal(data)
-		if err != nil {
-			return "", err
-		}
-	}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", err
-	}
+	reqUrl := c.Domain + path
 
-	// 设置头部
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-	req.Header.Set("Content-Type", "application/json")
+	// 创建请求客户端
+	client := c.createRequest(headers)
+	client.SetHeader("Content-Type", "application/json")
 
-	// 打印调试信息
-	fmt.Printf("POST请求地址: %s\n", url)
-	// fmt.Printf("请求header: %s\n", util.ToJSONString(headers))
-	fmt.Printf("请求参数: %s\n", string(jsonData))
-
-	// 执行请求
-	resp, err := c.doRequestWithRetry(req, 3)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	// 读取响应
-	body, err := util.ReadResponseBody(resp)
-	if err != nil {
-		return "", err
-	}
-
-	// 打印响应
-	// fmt.Printf("response: %s\n", body)
-
-	return body, nil
-}
-
-var httpClient *http.Client
-
-func init() {
-	httpClient = &http.Client{
-		Timeout: 30 * time.Second,
-	}
-}
-
-// doRequestWithRetry 发送请求并重试
-func (c *SheinClient) doRequestWithRetry(req *http.Request, retries int) (*http.Response, error) {
-	var resp *http.Response
-	var err error
-	for i := 0; i < retries; i++ {
-		resp, err = httpClient.Do(req)
-		if err == nil && resp.StatusCode < 500 {
-			return resp, nil
-		}
-		time.Sleep(time.Duration(math.Pow(2, float64(i))) * time.Second)
-	}
-	return resp, err
+	// 发送请求并获取响应（带重试机制）
+	resp, err := client.Post(context.Background(), reqUrl, data)
+	return c.handleResponse(resp, err)
 }
